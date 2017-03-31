@@ -19,10 +19,6 @@
 # along with this software.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-ANSIBLE_METADATA = {'status': ['stableinterface'],
-                    'supported_by': 'core',
-                    'version': '1.0'}
-
 DOCUMENTATION = '''
 ---
 module: apt
@@ -131,70 +127,44 @@ notes:
 '''
 
 EXAMPLES = '''
-- name: Update repositories cache and install "foo" package
-  apt:
-    name: foo
-    update_cache: yes
+# Update repositories cache and install "foo" package
+- apt: name=foo update_cache=yes
 
-- name: Remove "foo" package
-  apt:
-    name: foo
-    state: absent
+# Remove "foo" package
+- apt: name=foo state=absent
 
-- name: Install the package "foo"
-  apt:
-    name: foo
-    state: present
+# Install the package "foo"
+- apt: name=foo state=present
 
-- name: Install the version '1.00' of package "foo"
-  apt:
-    name: foo=1.00
-    state: present
+# Install the version '1.00' of package "foo"
+- apt: name=foo=1.00 state=present
 
-- name: Update the repository cache and update package "nginx" to latest version using default release squeeze-backport
-  apt:
-    name: nginx
-    state: latest
-    default_release: squeeze-backports
-    update_cache: yes
+# Update the repository cache and update package "nginx" to latest version using default release squeeze-backport
+- apt: name=nginx state=latest default_release=squeeze-backports update_cache=yes
 
-- name: Install latest version of "openjdk-6-jdk" ignoring "install-recommends"
-  apt:
-    name: openjdk-6-jdk
-    state: latest
-    install_recommends: no
+# Install latest version of "openjdk-6-jdk" ignoring "install-recommends"
+- apt: name=openjdk-6-jdk state=latest install_recommends=no
 
-- name: Update all packages to the latest version
-  apt:
-    upgrade: dist
+# Update all packages to the latest version
+- apt: upgrade=dist
 
-- name: Run the equivalent of "apt-get update" as a separate step
-  apt:
-    update_cache: yes
+# Run the equivalent of "apt-get update" as a separate step
+- apt: update_cache=yes
 
-- name: Only run "update_cache=yes" if the last one is more than 3600 seconds ago
-  apt:
-    update_cache: yes
-    cache_valid_time: 3600
+# Only run "update_cache=yes" if the last one is more than 3600 seconds ago
+- apt: update_cache=yes cache_valid_time=3600
 
-- name: Pass options to dpkg on run
-  apt:
-    upgrade: dist
-    update_cache: yes
-    dpkg_options: 'force-confold,force-confdef'
+# Pass options to dpkg on run
+- apt: upgrade=dist update_cache=yes dpkg_options='force-confold,force-confdef'
 
-- name: Install a .deb package
-  apt:
-    deb: /tmp/mypackage.deb
+# Install a .deb package
+- apt: deb=/tmp/mypackage.deb
 
-- name: Install the build dependencies for package "foo"
-  apt:
-    pkg: foo
-    state: build-dep
+# Install the build dependencies for package "foo"
+- apt: pkg=foo state=build-dep
 
-- name: Install a .deb package from the internet.
-  apt:
-    deb: https://example.com/python-ppq_0.1-1_all.deb
+# Install a .deb package from the internet.
+- apt: deb=https://example.com/python-ppq_0.1-1_all.deb
 '''
 
 RETURN = '''
@@ -251,6 +221,7 @@ APT_ENV_VARS = dict(
 
 DPKG_OPTIONS = 'force-confdef,force-confold'
 APT_GET_ZERO = "\n0 upgraded, 0 newly installed"
+APT_REMOVE_ZERO = "\n0 upgraded, 0 newly installed, 0 to remove"
 APTITUDE_ZERO = "\n0 packages upgraded, 0 newly installed"
 APT_LISTS_PATH = "/var/lib/apt/lists"
 APT_UPDATE_SUCCESS_STAMP_PATH = "/var/lib/apt/periodic/update-success-stamp"
@@ -454,28 +425,29 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
             allow_unauthenticated=False):
     pkg_list = []
     packages = ""
-    pkgspec = expand_pkgspec_from_fnmatches(m, pkgspec, cache)
-    for package in pkgspec:
-        if build_dep:
-            # Let apt decide what to install
-            pkg_list.append("'%s'" % package)
-            continue
+    if pkgspec:
+        pkgspec = expand_pkgspec_from_fnmatches(m, pkgspec, cache)
+        for package in pkgspec:
+            if build_dep:
+                # Let apt decide what to install
+                pkg_list.append("'%s'" % package)
+                continue
+    
+            name, version = package_split(package)
+            installed, upgradable, has_files = package_status(m, name, version, cache, state='install')
+            if not installed or (upgrade and upgradable):
+                pkg_list.append("'%s'" % package)
+            if installed and upgradable and version:
+                # This happens when the package is installed, a newer version is
+                # available, and the version is a wildcard that matches both
+                #
+                # We do not apply the upgrade flag because we cannot specify both
+                # a version and state=latest.  (This behaviour mirrors how apt
+                # treats a version with wildcard in the package)
+                pkg_list.append("'%s'" % package)
+        packages = ' '.join(pkg_list)
 
-        name, version = package_split(package)
-        installed, upgradable, has_files = package_status(m, name, version, cache, state='install')
-        if not installed or (upgrade and upgradable):
-            pkg_list.append("'%s'" % package)
-        if installed and upgradable and version:
-            # This happens when the package is installed, a newer version is
-            # available, and the version is a wildcard that matches both
-            #
-            # We do not apply the upgrade flag because we cannot specify both
-            # a version and state=latest.  (This behaviour mirrors how apt
-            # treats a version with wildcard in the package)
-            pkg_list.append("'%s'" % package)
-    packages = ' '.join(pkg_list)
-
-    if len(packages) != 0:
+    if len(packages) != 0 or autoremove:
         if force:
             force_yes = '--force-yes'
         else:
@@ -488,6 +460,7 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
 
         if autoremove:
             autoremove = '--auto-remove'
+            force_yes = '--force-yes'
         else:
             autoremove = ''
 
@@ -520,9 +493,11 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
             diff = {}
         if rc:
             return (False, dict(msg="'%s' failed: %s" % (cmd, err), stdout=out, stderr=err))
+        elif APT_REMOVE_ZERO in out:
+            return (True, dict(changed=False, stdout=out, stderr=err, diff=diff))
         else:
             return (True, dict(changed=True, stdout=out, stderr=err, diff=diff))
-    else:
+    elif len(packages) == 0:
         return (True, dict(changed=False))
 
 
@@ -622,7 +597,11 @@ def remove(m, pkgspec, cache, purge=False, force=False,
     packages = ' '.join(pkg_list)
 
     if len(packages) == 0:
-        m.exit_json(changed=False)
+        if autoremove:
+            autoremove = '--auto-remove'
+            force_yes = '--force-yes'
+        else:
+            m.exit_json(changed=False)
     else:
         if force:
             force_yes = '--force-yes'
@@ -636,6 +615,7 @@ def remove(m, pkgspec, cache, purge=False, force=False,
 
         if autoremove:
             autoremove = '--auto-remove'
+            force_yes = '--force-yes'
         else:
             autoremove = ''
 
@@ -644,16 +624,16 @@ def remove(m, pkgspec, cache, purge=False, force=False,
         else:
             check_arg = ''
 
-        cmd = "%s -q -y %s %s %s %s %s remove %s" % (APT_GET_CMD, dpkg_options, purge, force_yes ,autoremove, check_arg, packages)
+    cmd = "%s -q -y %s %s %s %s %s remove %s" % (APT_GET_CMD, dpkg_options, purge, force_yes ,autoremove, check_arg, packages)
 
-        rc, out, err = m.run_command(cmd)
-        if m._diff:
-            diff = parse_diff(out)
-        else:
-            diff = {}
-        if rc:
-            m.fail_json(msg="'apt-get remove %s' failed: %s" % (packages, err), stdout=out, stderr=err)
-        m.exit_json(changed=True, stdout=out, stderr=err, diff=diff)
+    rc, out, err = m.run_command(cmd)
+    if m._diff:
+        diff = parse_diff(out)
+    else:
+        diff = {}
+    if rc:
+        m.fail_json(msg="'apt-get remove %s' failed: %s" % (packages, err), stdout=out, stderr=err)
+    m.exit_json(changed=True, stdout=out, stderr=err, diff=diff)
 
 
 def upgrade(m, mode="yes", force=False, default_release=None,
@@ -759,31 +739,6 @@ def get_updated_cache_time():
     return mtimestamp, updated_cache_time
 
 
-# https://github.com/ansible/ansible-modules-core/issues/2951
-def get_cache(module):
-    '''Attempt to get the cache object and update till it works'''
-    cache = None
-    try:
-        cache = apt.Cache()
-    except SystemError:
-        e = get_exception()
-        if '/var/lib/apt/lists/' in str(e).lower():
-            # update cache until files are fixed or retries exceeded
-            retries = 0
-            while retries < 2:
-                (rc, so, se) = module.run_command(['apt-get', 'update', '-q'])
-                retries += 1
-                if rc == 0:
-                    break
-            if rc != 0:
-                module.fail_json(msg='Updating the cache to correct corrupt package lists failed:\n%s\n%s' % (str(e), str(so) + str(se)))    
-            # try again
-            cache = apt.Cache()
-        else:
-            module.fail_json(msg=str(e))
-    return cache
- 
-
 def main():
     module = AnsibleModule(
         argument_spec = dict(
@@ -850,10 +805,8 @@ def main():
     if p['state'] == 'removed':
         p['state'] = 'absent'
 
-    # Get the cache object
-    cache = get_cache(module)
-
     try:
+        cache = apt.Cache()
         if p['default_release']:
             try:
                 apt_pkg.config['APT::Default-Release'] = p['default_release']
@@ -885,7 +838,7 @@ def main():
 
             # If there is nothing else to do exit. This will set state as
             #  changed based on if the cache was updated.
-            if not p['package'] and not p['upgrade'] and not p['deb']:
+            if not autoremove and not p['package'] and not p['upgrade'] and not p['deb']:
                 module.exit_json(
                     changed=updated_cache,
                     cache_updated=updated_cache,
@@ -909,11 +862,12 @@ def main():
 
         packages = p['package']
         latest = p['state'] == 'latest'
-        for package in packages:
-            if package.count('=') > 1:
-                module.fail_json(msg="invalid package spec: %s" % package)
-            if latest and '=' in package:
-                module.fail_json(msg='version number inconsistent with state=latest: %s' % package)
+        if packages:
+            for package in packages:
+                if package.count('=') > 1:
+                    module.fail_json(msg="invalid package spec: %s" % package)
+                if latest and '=' in package:
+                    module.fail_json(msg='version number inconsistent with state=latest: %s' % package)
 
         if p['state'] in ('latest', 'present', 'build-dep'):
             state_upgrade = False
@@ -942,6 +896,12 @@ def main():
             retvals['cache_updated'] = updated_cache
             # Store when the update time was last
             retvals['cache_update_time'] = updated_cache_time
+            # If the cache was updated and the general state change was set to
+            #  False make sure that the change in cache state is accurately
+            #  updated by setting the general changed state to the same as
+            #  the cache state.
+            if updated_cache and not retvals['changed']:
+                retvals['changed'] = updated_cache
 
             if success:
                 module.exit_json(**retvals)
